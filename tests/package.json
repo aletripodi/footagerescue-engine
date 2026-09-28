@@ -1,0 +1,12 @@
+{
+  "name": "footagerescue-engine-tests",
+  "private": true,
+  "type": "module",
+  "description": "Browser tests for the FootageRescue engine (drives an installed Chrome).",
+  "scripts": {
+    "browser": "node browser/run.mjs"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^24.0.0"
+  }
+}

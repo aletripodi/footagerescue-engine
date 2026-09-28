@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Engine test harness</title>
+</head>
+<body>
+<!-- Driven by run.mjs. The destination is a file in the origin private file system
+     (OPFS), which gives the same FileSystemFileHandle as showSaveFilePicker(). -->
+<input id="broken" type="file">
+<input id="reference" type="file">
+<script type="module">
+import { repair, analyze, cascade, preview, fingerprint, inspectRsv, inspectReference } from "/engine/engine.js";
+import { sha256Blob } from "/sha256.js";
+
+const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+const sha256 = async (blob) => hex(await crypto.subtle.digest("SHA-256", await blob.arrayBuffer()));
+const files = () => ({ broken: document.getElementById("broken").files[0], reference: document.getElementById("reference").files[0] });
+
+// Full repair into OPFS; returns hashes of the output so the runner can compare it
+// with the native result without copying the file out of the browser.
+window.runRepair = async ({ method, maxDuration, dropCut = false, name, fullHash }) => {
+	const { broken, reference } = files();
+	const root = await navigator.storage.getDirectory();
+	const handle = await root.getFileHandle(name, { create: true });
+	let lastPercent = -1, progressEvents = 0;
+	try {
+		const result = await repair({
+			broken, reference, method, dropCut, destination: handle,
+			analysis: maxDuration ? await analyze({ broken, reference, method, maxDuration, dropCut }) : undefined,
+			onProgress: (p) => { progressEvents++; lastPercent = p.percent; },
+		});
+		const out = await handle.getFile();
+		const tail = Math.min(out.size, 32 << 20);
+		return {
+			ok: true,
+			size: out.size,
+			sha256: fullHash ? await sha256Blob(out) : null,
+			headSha256: await sha256(out.slice(0, Math.min(out.size, 1 << 20))),
+			tailSha256: await sha256(out.slice(out.size - tail)),
+			ranges: result.plan.ranges,
+			headerSize: result.plan.header_size,
+			diagnostics: result.diagnostics,
+			timings: result.timings,
+			progressEvents, lastPercent,
+		};
+	} catch (e) {
+		return { ok: false, name: e.name, message: e.message, log: (e.log || []).slice(-5) };
+	} finally {
+		await root.removeEntry(name).catch(() => {});
+	}
+};
+
+// Analysis only (no output file): the headers and plan untrunc produced.
+window.runAnalyze = async ({ method, maxDuration, dropCut = false }) => {
+	const { broken, reference } = files();
+	try {
+		const t0 = performance.now();
+		const r = await analyze({ broken, reference, method, maxDuration, dropCut });
+		return { ok: true, headersSha256: hex(await crypto.subtle.digest("SHA-256", r.headers)), plan: r.plan,
+			diagnostics: r.diagnostics, ms: performance.now() - t0 };
+	} catch (e) {
+		return { ok: false, name: e.name, message: e.message, log: (e.log || []).slice(-5) };
+	}
+};
+
+// Cancel while the output is being written: the promise must reject with AbortError.
+window.runCancel = async ({ method, name }) => {
+	const { broken, reference } = files();
+	const root = await navigator.storage.getDirectory();
+	const handle = await root.getFileHandle(name, { create: true });
+	const controller = new AbortController();
+	try {
+		await repair({ broken, reference, method, dropCut: false, destination: handle, signal: controller.signal,
+			onProgress: (p) => { if (p.phase === "write" && p.bytesWritten > (64 << 20)) controller.abort(); } });
+		return { ok: false, message: "finished without cancelling" };
+	} catch (e) {
+		return { ok: e.name === "AbortError", name: e.name, message: e.message };
+	} finally {
+		await root.removeEntry(name).catch(() => {});
+	}
+};
+
+// Cascade, preview and inspection, as the /rsv page uses them.
+window.runCascade = async () => {
+	const { broken, reference } = files();
+	const r = await cascade({ broken, reference });
+	return { best: r.best && { method: r.best.method, quality: r.best.quality },
+		attempts: r.attempts.map((a) => ({ method: a.method, error: a.error?.message, quality: a.quality })) };
+};
+window.runPreview = async ({ seconds }) => {
+	const { broken, reference } = files();
+	const r = await preview({ broken, reference, seconds });
+	return { size: r.blob.size, type: r.blob.type, sha256: await sha256Blob(r.blob), quality: r.quality };
+};
+window.runInspect = async () => {
+	const { broken, reference } = files();
+	return { rsv: await inspectRsv(broken), reference: await inspectReference(reference),
+		fingerprint: await fingerprint(broken) };
+};
+
+window.harnessReady = true;
+</script>
+</body>
+</html>
